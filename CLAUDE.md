@@ -8,28 +8,84 @@ A credential gatekeeper API that mediates between an AI agent (Jarvis/OpenClaw) 
 
 ```
 src/
-├── index.ts          # Express server entry point
+├── index.ts          # Socket Mode Slack app + standalone Express server
 ├── routes/
 │   ├── request.ts    # POST /request — credential request endpoint
 │   └── health.ts     # GET /health — healthcheck
 ├── slack/
 │   ├── notify.ts     # Send approval request to Slack
-│   └── interact.ts   # Handle Slack interactive message callbacks
+│   └── interact.ts   # Handle Slack interactive message callbacks (via Socket Mode)
 ├── store/
 │   └── onepassword.ts # 1Password service account integration
 ├── middleware/
 │   ├── auth.ts       # API key validation
 │   └── rateLimit.ts  # Rate limiting (10 req/min per IP)
-└── types.ts          # Shared type definitions
+├── types.ts          # Shared type definitions
+└── ...
+deploy/
+├── launch.sh                          # Wrapper script (pulls secrets from Keychain)
+└── com.jarvis.credential-manager.plist # launchd plist for ~/Library/LaunchAgents/
 ```
 
 ## Stack
 
 - **TypeScript** with strict mode
-- **Express** for HTTP
+- **Express** for HTTP REST API (credential requests, health check)
+- **@slack/bolt** in **Socket Mode** for Slack interactions (approve/deny buttons)
 - **@1password/sdk** for credential fetching (service account token, not CLI)
-- **@slack/web-api** + **@slack/bolt** for Slack interactive messages
-- **Docker Compose** for deployment
+
+### Socket Mode Architecture
+
+Slack interactions (approve/deny button clicks) use **Socket Mode** — an outbound WebSocket from this service to Slack's servers. This means:
+
+- **No public internet exposure needed.** The service only makes outbound connections.
+- **No ngrok, no tunnels, no public URLs.** Runs entirely on the LAN.
+- **No request signature verification** for Slack interactions (Socket Mode handles auth over the WebSocket). `SLACK_SIGNING_SECRET` is only needed if you add direct HTTP webhook endpoints.
+
+The REST API (POST `/request`, GET `/health`) runs on a separate standalone Express server on the configured port. This is what the AI agent calls to request credentials.
+
+## Deployment
+
+### launchd (macOS)
+
+The service runs as a **launchd user agent** — starts on login, restarts on crash.
+
+**Setup:**
+
+1. Build the project: `pnpm build`
+
+2. Store all secrets in macOS Keychain:
+   ```bash
+   security add-generic-password -s "jarvis-credential-manager" -a "OP_SERVICE_ACCOUNT_TOKEN" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_BOT_TOKEN" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_APP_TOKEN" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_SIGNING_SECRET" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_CHANNEL_ID" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_LOG_CHANNEL_ID" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "API_TOKEN" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "OP_VAULT_ID" -w "<value>"
+   ```
+   To update an existing secret, add `-U` flag.
+
+3. Install the plist:
+   ```bash
+   cp deploy/com.jarvis.credential-manager.plist ~/Library/LaunchAgents/
+   launchctl load ~/Library/LaunchAgents/com.jarvis.credential-manager.plist
+   ```
+
+4. Check logs:
+   ```bash
+   tail -f ~/Library/Logs/jarvis-credential-manager.log
+   ```
+
+5. Manage:
+   ```bash
+   launchctl stop com.jarvis.credential-manager
+   launchctl start com.jarvis.credential-manager
+   launchctl unload ~/Library/LaunchAgents/com.jarvis.credential-manager.plist
+   ```
+
+> **Note:** The `deploy/launch.sh` wrapper pulls all secrets from Keychain at launch time. Non-secret config (PORT, REQUEST_TIMEOUT_MS) is set in the plist's EnvironmentVariables dict.
 
 ## Key Design Decisions
 
@@ -37,7 +93,7 @@ src/
 - **Auto-deny timeout** — 10 minutes. If the human doesn't respond, the request is denied. Fail closed.
 - **One-time use** — Credential is returned once in the HTTP response. Agent must use it immediately.
 - **LAN-only** — Bind to localhost or private network. Never expose publicly.
-- **API key auth** — Simple bearer token. The API key is stored in `.env`, not in 1Password (bootstrapping problem).
+- **API key auth** — Simple bearer token for the REST API.
 
 ## Development
 
@@ -51,15 +107,19 @@ pnpm test         # Run tests
 ## Environment Variables
 
 See `.env.example` for all required variables:
-- `API_KEY` — Bearer token for agent authentication
-- `OP_SERVICE_ACCOUNT_TOKEN` — 1Password service account token
-- `OP_VAULT_ID` — 1Password vault ID to fetch from
-- `SLACK_BOT_TOKEN` — Slack bot OAuth token
-- `SLACK_SIGNING_SECRET` — Slack request signing secret
-- `SLACK_CHANNEL_ID` — Channel for approval requests
-- `SLACK_LOG_CHANNEL_ID` — Channel for audit logs
-- `PORT` — Server port (default: 3847)
-- `REQUEST_TIMEOUT_MS` — Approval timeout (default: 600000 = 10 min)
+
+| Variable | Description |
+|---|---|
+| `API_KEY` | Bearer token for agent authentication |
+| `OP_SERVICE_ACCOUNT_TOKEN` | 1Password service account token |
+| `OP_VAULT_ID` | 1Password vault ID to fetch from |
+| `SLACK_BOT_TOKEN` | Slack bot OAuth token (`xoxb-...`) |
+| `SLACK_APP_TOKEN` | Slack app-level token for Socket Mode (`xapp-...`). Generate in Slack app settings → Basic Information → App-Level Tokens with `connections:write` scope. |
+| `SLACK_SIGNING_SECRET` | Slack request signing secret. **Not used by Socket Mode** — only needed if you add direct HTTP webhook endpoints. |
+| `SLACK_CHANNEL_ID` | Channel for approval requests |
+| `SLACK_LOG_CHANNEL_ID` | Channel for audit logs |
+| `PORT` | REST API server port (default: 3847) |
+| `REQUEST_TIMEOUT_MS` | Approval timeout (default: 600000 = 10 min) |
 
 ## Conventions
 
@@ -74,4 +134,4 @@ See `.env.example` for all required variables:
 - Never log credential values. Log service name, scope, requester, and decision only.
 - The `.env` file must never be committed. It's in `.gitignore`.
 - Rate limiting is per-IP, not per-API-key (simpler, sufficient for LAN).
-- Slack request signature verification is mandatory in production.
+- Secrets are stored in macOS Keychain, not in files or environment config.

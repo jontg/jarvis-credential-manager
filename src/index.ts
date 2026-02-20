@@ -1,5 +1,5 @@
 import express from 'express';
-import { App, ExpressReceiver } from '@slack/bolt';
+import { App } from '@slack/bolt';
 import type { PendingRequest } from './types.js';
 import healthRouter from './routes/health.js';
 import { createRequestRouter } from './routes/request.js';
@@ -9,19 +9,17 @@ import { registerInteractions } from './slack/interact.js';
 
 const pendingRequests = new Map<string, PendingRequest>();
 
-const receiver = new ExpressReceiver({
-  signingSecret: process.env.SLACK_SIGNING_SECRET ?? '',
-});
-
+// Slack Bolt app in Socket Mode (outbound WebSocket, no public endpoint needed)
 const boltApp = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  receiver,
+  socketMode: true,
+  appToken: process.env.SLACK_APP_TOKEN,
 });
 
 registerInteractions(boltApp, pendingRequests);
 
-// Mount additional routes on the receiver's Express app
-const expressApp = receiver.app;
+// Standalone Express server for the REST API
+const expressApp: ReturnType<typeof express> = express();
 
 // Health check (no auth required)
 expressApp.use(healthRouter);
@@ -34,7 +32,12 @@ expressApp.use(createRequestRouter(boltApp.client, pendingRequests));
 
 const port = parseInt(process.env.PORT ?? '3847', 10);
 
-await boltApp.start(port);
-console.log(`⚡ Credential manager listening on port ${port}`);
+// Start both: Bolt Socket Mode + Express HTTP server
+await boltApp.start();
+console.log('⚡ Slack Socket Mode connected');
+
+expressApp.listen(port, () => {
+  console.log(`⚡ REST API listening on port ${port}`);
+});
 
 export { boltApp, expressApp, pendingRequests };
