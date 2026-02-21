@@ -33,30 +33,41 @@ This service sits between the AI agent (Jarvis/OpenClaw) and 1Password. Every cr
 
 ```
 src/
-├── index.ts              # Express + Slack Bolt server (single port via ExpressReceiver)
+├── index.ts          # Socket Mode Slack app + standalone Express server
 ├── routes/
 │   ├── request.ts        # POST /request — credential request endpoint
 │   └── health.ts         # GET /health — healthcheck
 ├── slack/
-│   ├── notify.ts         # Send Block Kit approval request to Slack
-│   └── interact.ts       # Handle approve/deny button callbacks
+│   ├── notify.ts     # Send approval request to Slack
+│   └── interact.ts   # Handle Slack interactive message callbacks (via Socket Mode)
 ├── store/
 │   └── onepassword.ts    # 1Password SDK integration (service account, vault lookup)
 ├── middleware/
-│   ├── auth.ts           # Bearer token validation
-│   └── rateLimit.ts      # Rate limiting (10 req/min per IP, in-memory)
-├── types.ts              # Shared type definitions (CredentialRequest, CredentialResponse, PendingRequest)
+│   ├── auth.ts       # API key validation
+│   └── rateLimit.ts  # Rate limiting (10 req/min per IP)
+├── types.ts          # Shared type definitions (CredentialRequest, CredentialResponse, PendingRequest)
 └── __tests__/
     └── request.test.ts   # Vitest tests with mocked Slack and 1Password
+deploy/
+├── launch.sh                          # Wrapper script (pulls secrets from Keychain)
+└── com.jarvis.credential-manager.plist # launchd plist for ~/Library/LaunchAgents/
 ```
 
-**Key architectural choice:** Slack Bolt's `ExpressReceiver` is used so that both Slack interactive endpoints and our own REST API run on a single Express app/port. No separate webhook server needed.
+### Socket Mode Architecture
+
+Slack interactions (approve/deny button clicks) use **Socket Mode** — an outbound WebSocket from this service to Slack's servers. This means:
+
+- **No public internet exposure needed.** The service only makes outbound connections.
+- **No ngrok, no tunnels, no public URLs.** Runs entirely on the LAN.
+- **No request signature verification** for Slack interactions (Socket Mode handles auth over the WebSocket). `SLACK_SIGNING_SECRET` is only needed if you add direct HTTP webhook endpoints.
+
+The REST API (POST `/request`, GET `/health`) runs on a separate standalone Express server on the configured port. This is what the AI agent calls to request credentials.
 
 ## Stack
 
 - **TypeScript** with strict mode
-- **Express** (v4) for HTTP
-- **@slack/bolt** + **@slack/web-api** for Slack interactive messages
+- **Express** for HTTP REST API (credential requests, health check)
+- **@slack/bolt** in **Socket Mode** for Slack interactions (approve/deny buttons)
 - **@1password/sdk** for credential fetching (service account token, not CLI)
 - **Vitest** for testing
 - **Docker Compose** for deployment
@@ -71,7 +82,57 @@ These are non-negotiable principles. Do not change them without discussion.
 - **LAN-only** — Bind to localhost or private network. Never expose to the public internet.
 - **API key auth** — Simple Bearer token. The API key lives in `.env`, not in 1Password (bootstrapping problem — you can't use the service to fetch its own auth).
 - **No AI in the trust chain** — This service has zero AI/LLM dependencies. It does not process prompts, make decisions, or use any intelligence. It's a dumb relay with a human gate.
-- **Single-port architecture** — Slack Bolt's ExpressReceiver shares the port with the API routes. One process, one port.
+- **Socket Mode + standalone Express** — Slack Bolt handles interactions over WebSocket; Express handles the REST API on its own port. Two transports, one process.
+
+## Deployment
+
+### launchd (macOS)
+
+The service runs as a **launchd user agent** — starts on login, restarts on crash.
+
+**Setup:**
+
+1. Build the project: `pnpm build`
+
+2. Store all secrets in macOS Keychain:
+   ```bash
+   security add-generic-password -s "jarvis-credential-manager" -a "OP_SERVICE_ACCOUNT_TOKEN" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_BOT_TOKEN" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_APP_TOKEN" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_SIGNING_SECRET" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_CHANNEL_ID" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "SLACK_LOG_CHANNEL_ID" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "API_TOKEN" -w "<value>"
+   security add-generic-password -s "jarvis-credential-manager" -a "OP_VAULT_ID" -w "<value>"
+   ```
+   To update an existing secret, add `-U` flag.
+
+3. Install the plist:
+   ```bash
+   cp deploy/com.jarvis.credential-manager.plist ~/Library/LaunchAgents/
+   launchctl load ~/Library/LaunchAgents/com.jarvis.credential-manager.plist
+   ```
+
+4. Check logs:
+   ```bash
+   tail -f ~/Library/Logs/jarvis-credential-manager.log
+   ```
+
+5. Manage:
+   ```bash
+   launchctl stop com.jarvis.credential-manager
+   launchctl start com.jarvis.credential-manager
+   launchctl unload ~/Library/LaunchAgents/com.jarvis.credential-manager.plist
+   ```
+
+> **Note:** The `deploy/launch.sh` wrapper pulls all secrets from Keychain at launch time. Non-secret config (PORT, REQUEST_TIMEOUT_MS) is set in the plist's EnvironmentVariables dict.
+
+### Docker
+
+```bash
+cp .env.example .env  # Configure your tokens
+docker compose up     # Build and run
+```
 
 ## Development
 
@@ -81,13 +142,6 @@ pnpm dev              # Run with tsx watch (hot reload)
 pnpm build            # TypeScript compile to dist/
 pnpm test             # Run vitest tests
 pnpm start            # Run compiled output (production)
-```
-
-### Docker
-
-```bash
-cp .env.example .env  # Configure your tokens
-docker compose up     # Build and run
 ```
 
 ## Testing
@@ -116,10 +170,11 @@ See `.env.example` for all required variables:
 | `OP_SERVICE_ACCOUNT_TOKEN` | 1Password service account token | (required) |
 | `OP_VAULT_ID` | 1Password vault ID to fetch from | (required) |
 | `SLACK_BOT_TOKEN` | Slack bot OAuth token (`xoxb-...`) | (required) |
-| `SLACK_SIGNING_SECRET` | Slack request signing secret | (required) |
+| `SLACK_APP_TOKEN` | Slack app-level token for Socket Mode (`xapp-...`). Generate in Slack app settings → Basic Information → App-Level Tokens with `connections:write` scope. | (required) |
+| `SLACK_SIGNING_SECRET` | Slack request signing secret. **Not used by Socket Mode** — only needed if you add direct HTTP webhook endpoints. | (required) |
 | `SLACK_CHANNEL_ID` | Channel for approval requests | (required) |
 | `SLACK_LOG_CHANNEL_ID` | Channel for audit logs | (required) |
-| `PORT` | Server port | `3847` |
+| `PORT` | REST API server port | `3847` |
 | `REQUEST_TIMEOUT_MS` | Approval timeout in ms | `600000` (10 min) |
 
 ## Conventions
@@ -152,7 +207,7 @@ See `.env.example` for all required variables:
 - **Never cache credentials.** Not in memory, not in a database, not in a file. Fetch from 1Password on every approved request.
 - The `.env` file must never be committed. It's in `.gitignore`.
 - Rate limiting is per-IP, not per-API-key (simpler, sufficient for LAN).
-- Slack request signature verification is mandatory in production (handled by Bolt).
+- Secrets are stored in macOS Keychain, not in files or environment config.
 - The 1Password client is initialized lazily (singleton) — the service account token is read from env at first use.
 
 ## What NOT To Do

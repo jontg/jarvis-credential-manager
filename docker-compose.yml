@@ -1,0 +1,7 @@
+services:
+  credential-manager:
+    build: .
+    env_file: .env
+    ports:
+      - "3847:3847"
+    restart: unless-stopped
