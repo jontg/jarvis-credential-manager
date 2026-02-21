@@ -23,4 +23,4 @@ export API_KEY=$(kc API_KEY)
 export OP_VAULT_ID=$(kc OP_VAULT_ID)
 
 cd "$(dirname "$0")/.." || exit 1
-exec /usr/local/bin/node dist/index.js
+exec /opt/homebrew/bin/node dist/index.js
