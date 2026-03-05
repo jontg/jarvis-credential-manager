@@ -44,16 +44,41 @@ export async function fetchCredential(
   let credential = '';
   const fields: Record<string, string> = {};
 
+  // Parse scope as comma-separated terms for multi-field lookups
+  const scopeTerms = scope
+    ? scope.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    : [];
+
   for (const field of item.fields) {
+    // Skip empty values
+    if (!field.value) continue;
+
+    // Collect concealed field as fallback primary credential
     if (field.fieldType === ItemFieldType.Concealed && !credential) {
       credential = field.value;
     }
-    if (scope && field.title.toLowerCase().includes(scope.toLowerCase())) {
+
+    // If scope terms provided, match any term against field title
+    if (scopeTerms.length > 0) {
+      const titleLower = field.title.toLowerCase();
+      if (scopeTerms.some((term) => titleLower.includes(term))) {
+        fields[field.title] = field.value;
+      }
+    } else {
+      // No scope specified — return all non-empty fields
       fields[field.title] = field.value;
     }
   }
 
-  if (!credential) throw new Error(`No credential found for service: ${service}`);
+  // If specific fields were requested and found, use the first matched value as credential
+  const matchedValues = Object.values(fields);
+  if (matchedValues.length > 0 && !scopeTerms.some((t) => t === 'cvv' || t === 'password')) {
+    credential = matchedValues[0];
+  }
+
+  if (!credential && matchedValues.length === 0) {
+    throw new Error(`No credential found for service: ${service}`);
+  }
 
   return { credential, fields };
 }
