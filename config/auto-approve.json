@@ -1,0 +1,14 @@
+[
+  {
+    "id": "shopper-friday",
+    "description": "Random Shopper cron runs on Fridays — auto-approve Greenlight card credentials",
+    "service": "Greenlight",
+    "scope": "*",
+    "conditions": {
+      "dayOfWeek": [5],
+      "hourRange": { "start": 6, "end": 20 },
+      "reasonContains": "shopper"
+    },
+    "enabled": true
+  }
+]
