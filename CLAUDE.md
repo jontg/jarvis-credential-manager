@@ -25,9 +25,10 @@ This service sits between the AI agent (Jarvis/OpenClaw) and 1Password. Every cr
 ```
 
 1. **Agent requests a credential** — `POST /request` with service name, scope, and reason
-2. **Slack notification** — Human gets a Block Kit message with approve/deny buttons
-3. **Human decides** — Approve fetches from 1Password and returns it; deny or 10-minute timeout returns 403
-4. **Audit trail** — Every request/decision is logged to a dedicated Slack channel
+2. **Auto-approval check** — If a matching rule exists in `config/auto-approve.json`, credential is fetched and returned immediately with audit log
+3. **Slack notification** (if no auto-approval) — Human gets a Block Kit message with approve/deny buttons
+4. **Human decides** — Approve fetches from 1Password and returns it; deny or 10-minute timeout returns 403
+5. **Audit trail** — Every request/decision is logged to a dedicated Slack channel
 
 ## Architecture
 
@@ -45,9 +46,13 @@ src/
 ├── middleware/
 │   ├── auth.ts       # API key validation
 │   └── rateLimit.ts  # Rate limiting (10 req/min per IP)
+├── autoApprove.ts    # Auto-approval rule matching and config loading
 ├── types.ts          # Shared type definitions (CredentialRequest, CredentialResponse, PendingRequest)
 └── __tests__/
-    └── request.test.ts   # Vitest tests with mocked Slack and 1Password
+    ├── request.test.ts      # Vitest tests with mocked Slack and 1Password
+    └── autoApprove.test.ts  # Tests for auto-approval rules
+config/
+└── auto-approve.json # Auto-approval rules configuration
 deploy/
 ├── launch.sh                          # Wrapper script (pulls secrets from Keychain)
 └── com.jarvis.credential-manager.plist # launchd plist for ~/Library/LaunchAgents/
@@ -83,6 +88,45 @@ These are non-negotiable principles. Do not change them without discussion.
 - **API key auth** — Simple Bearer token. The API key lives in `.env`, not in 1Password (bootstrapping problem — you can't use the service to fetch its own auth).
 - **No AI in the trust chain** — This service has zero AI/LLM dependencies. It does not process prompts, make decisions, or use any intelligence. It's a dumb relay with a human gate.
 - **Socket Mode + standalone Express** — Slack Bolt handles interactions over WebSocket; Express handles the REST API on its own port. Two transports, one process.
+
+## Auto-Approval Rules
+
+For predictable, time-windowed credential requests (e.g., scheduled cron jobs), you can define auto-approval rules in `config/auto-approve.json`. These rules bypass human approval and immediately fetch and return credentials.
+
+### Rule Structure
+
+```json
+{
+  "id": "unique-rule-id",
+  "description": "Human-readable description",
+  "service": "ServiceName",
+  "scope": "*",
+  "conditions": {
+    "dayOfWeek": [5],
+    "hourRange": { "start": 6, "end": 20 },
+    "reasonContains": "substring"
+  },
+  "enabled": true
+}
+```
+
+### Rule Matching Logic
+
+All conditions are **AND-ed** together. A request must satisfy ALL specified conditions to match:
+
+- **service**: Case-insensitive exact match
+- **scope**: `"*"` matches any scope; otherwise case-insensitive exact match
+- **conditions.dayOfWeek**: Current day in America/Los_Angeles timezone (0=Sunday, 6=Saturday)
+- **conditions.hourRange**: Current hour in America/Los_Angeles timezone (24-hour format, inclusive start, exclusive end)
+- **conditions.reasonContains**: Case-insensitive substring match on request reason
+- Missing conditions are always satisfied (no constraint)
+
+### Security Notes
+
+- Rules are loaded at request time (no restart needed for config changes)
+- Invalid or missing config fails open to human approval (not auto-approval)
+- All auto-approvals are logged to `SLACK_LOG_CHANNEL_ID` with 🤖 prefix
+- Time-window conditions (dayOfWeek, hourRange) are **strongly recommended** as defense-in-depth
 
 ## Deployment
 
@@ -216,5 +260,5 @@ See `.env.example` for all required variables:
 - **Don't log credential values** — not in debug mode, not in error messages, not anywhere.
 - **Don't add AI/LLM dependencies** — no langchain, no openai, no inference libraries. This service must remain deterministic and auditable.
 - **Don't expose to the public internet** — this is LAN-only by design.
-- **Don't add automatic approval** — every credential access requires a human clicking a button.
+- **Don't add automatic approval without an explicit rule** — the `config/auto-approve.json` allow-list controls which requests can be auto-approved. Rules must have time-window conditions as a defense-in-depth measure.
 - **Don't store state in a database** — pending requests live in an in-memory Map and are ephemeral. If the server restarts, all pending requests are lost (and that's fine — fail closed).
