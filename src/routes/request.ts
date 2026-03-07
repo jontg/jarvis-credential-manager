@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { resolve } from 'path';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import type { WebClient } from '@slack/web-api';
 import type { PendingRequest, CredentialRequest, CredentialResponse } from '../types.js';
 import { sendApprovalRequest } from '../slack/notify.js';
@@ -28,6 +29,7 @@ export function createRequestRouter(
     console.log(`[request] ${requestId} — ${service} (${scope}): ${reason}`);
 
     // Auto-approval pre-check
+    const __dirname = dirname(fileURLToPath(import.meta.url));
     const configPath = resolve(__dirname, '../../config/auto-approve.json');
     const rules = loadRules(configPath);
     const matchedRule = matchRule({ service, scope, reason }, rules);
