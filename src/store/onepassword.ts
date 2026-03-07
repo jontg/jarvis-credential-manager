@@ -1,3 +1,4 @@
+import { execSync } from 'child_process';
 import { createClient, type Client, ItemFieldType } from '@1password/sdk';
 
 let client: Client | null = null;
@@ -13,6 +14,27 @@ async function getClient(): Promise<Client> {
     });
   }
   return client;
+}
+
+/**
+ * Fetch a single field value via the `op` CLI.
+ * Used as a fallback for field types the SDK marks as Unsupported (e.g. MonthYear / expiry dates).
+ */
+function fetchFieldViaCli(itemId: string, vaultId: string, fieldTitle: string): string {
+  try {
+    const token = process.env.OP_SERVICE_ACCOUNT_TOKEN ?? '';
+    const result = execSync(
+      `op item get ${itemId} --vault ${vaultId} --fields ${JSON.stringify(fieldTitle)}`,
+      {
+        env: { ...process.env, OP_SERVICE_ACCOUNT_TOKEN: token },
+        encoding: 'utf8',
+        timeout: 10_000,
+      },
+    );
+    return result.trim();
+  } catch {
+    return '';
+  }
 }
 
 export interface FetchedCredential {
@@ -50,23 +72,30 @@ export async function fetchCredential(
     : [];
 
   for (const field of item.fields) {
-    // Skip empty values
-    if (!field.value) continue;
+    // The @1password/sdk marks some field types (e.g. MonthYear for credit card expiry) as
+    // `Unsupported` and returns an empty value. Fall back to the `op` CLI for those.
+    let value = field.value;
+    if (!value && field.fieldType === ItemFieldType.Unsupported && field.title) {
+      value = fetchFieldViaCli(itemId, vaultId, field.title);
+    }
+
+    // Skip still-empty values
+    if (!value) continue;
 
     // Collect concealed field as fallback primary credential
     if (field.fieldType === ItemFieldType.Concealed && !credential) {
-      credential = field.value;
+      credential = value;
     }
 
     // If scope terms provided, match any term against field title
     if (scopeTerms.length > 0) {
       const titleLower = field.title.toLowerCase();
       if (scopeTerms.some((term) => titleLower.includes(term))) {
-        fields[field.title] = field.value;
+        fields[field.title] = value;
       }
     } else {
       // No scope specified — return all non-empty fields
-      fields[field.title] = field.value;
+      fields[field.title] = value;
     }
   }
 
