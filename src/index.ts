@@ -3,6 +3,7 @@ import { App } from '@slack/bolt';
 import type { PendingRequest } from './types.js';
 import healthRouter from './routes/health.js';
 import { createRequestRouter } from './routes/request.js';
+import { createStoreRouter } from './routes/store.js';
 import { authMiddleware } from './middleware/auth.js';
 import { rateLimitMiddleware } from './middleware/rateLimit.js';
 import { registerInteractions } from './slack/interact.js';
@@ -27,8 +28,11 @@ expressApp.use(healthRouter);
 // Rate limiting + auth + JSON parsing for API routes
 expressApp.use('/request', rateLimitMiddleware);
 expressApp.use('/request', authMiddleware);
+expressApp.use('/store', rateLimitMiddleware);
+expressApp.use('/store', authMiddleware);
 expressApp.use(express.json());
 expressApp.use(createRequestRouter(boltApp.client, pendingRequests));
+expressApp.use(createStoreRouter(boltApp.client));
 
 const port = parseInt(process.env.PORT ?? '3847', 10);
 
