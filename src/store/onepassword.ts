@@ -37,6 +37,66 @@ function fetchFieldViaCli(itemId: string, vaultId: string, fieldTitle: string): 
   }
 }
 
+export type StoreAction = 'created' | 'updated';
+
+/**
+ * Write (create or update) a 1Password Login item by title.
+ * Returns 'created' if a new item was made, 'updated' if an existing one was patched.
+ * Never logs field values — only field names.
+ */
+export async function storeCredential(
+  service: string,
+  fields: Record<string, string>,
+  vaultOverride?: string,
+): Promise<StoreAction> {
+  const vaultId = vaultOverride ?? process.env.OP_VAULT_ID;
+  if (!vaultId) throw new Error('OP_VAULT_ID not configured');
+
+  const op = await getClient();
+  const items = await op.items.listAll(vaultId);
+
+  let existingId: string | null = null;
+  for await (const item of items) {
+    if (item.title.toLowerCase() === service.toLowerCase()) {
+      existingId = item.id;
+      break;
+    }
+  }
+
+  if (existingId) {
+    // Update: fetch existing item, patch the specified fields
+    const existing = await op.items.get(vaultId, existingId);
+    for (const field of existing.fields) {
+      if (field.title && Object.prototype.hasOwnProperty.call(fields, field.title)) {
+        field.value = fields[field.title];
+      }
+    }
+    // Add any fields that don't already exist
+    const existingTitles = new Set(existing.fields.map((f) => f.title?.toLowerCase()));
+    for (const [title, value] of Object.entries(fields)) {
+      if (!existingTitles.has(title.toLowerCase())) {
+        existing.fields.push({ title, value, fieldType: ItemFieldType.Text } as never);
+      }
+    }
+    await op.items.put(existing);
+    return 'updated';
+  } else {
+    // Create: build a new Login item
+    const newItem = {
+      title: service,
+      vaultId,
+      category: 'Login' as const,
+      fields: Object.entries(fields).map(([title, value]) => ({
+        title,
+        value,
+        fieldType: title.toLowerCase() === 'password' ? ItemFieldType.Concealed : ItemFieldType.Text,
+      })),
+    };
+    await op.items.create(newItem as never);
+    return 'created';
+  }
+}
+
 export interface FetchedCredential {
   credential: string;
   fields: Record<string, string>;
