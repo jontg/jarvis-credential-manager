@@ -16,15 +16,21 @@ async function getClient(): Promise<Client> {
   return client;
 }
 
+// The @1password/sdk returns this placeholder for SSH key private key fields instead of the actual PEM.
+// Pattern: [use 'op item get <id> --reveal' to reveal]
+const OP_REVEAL_PLACEHOLDER = /^\[use 'op item get (\S+) --reveal' to reveal\]$/;
+
 /**
  * Fetch a single field value via the `op` CLI.
- * Used as a fallback for field types the SDK marks as Unsupported (e.g. MonthYear / expiry dates).
+ * Used as a fallback for field types the SDK marks as Unsupported (e.g. MonthYear / expiry dates),
+ * and for SSH key fields that return a reveal placeholder instead of the actual value.
  */
-function fetchFieldViaCli(itemId: string, vaultId: string, fieldTitle: string): string {
+function fetchFieldViaCli(itemId: string, vaultId: string, fieldTitle: string, reveal = false): string {
   try {
     const token = process.env.OP_SERVICE_ACCOUNT_TOKEN ?? '';
+    const revealFlag = reveal ? ' --reveal' : '';
     const result = execSync(
-      `op item get ${itemId} --vault ${vaultId} --fields ${JSON.stringify(fieldTitle)}`,
+      `op item get ${itemId} --vault ${vaultId} --fields ${JSON.stringify(fieldTitle)}${revealFlag}`,
       {
         env: { ...process.env, OP_SERVICE_ACCOUNT_TOKEN: token },
         encoding: 'utf8',
@@ -137,6 +143,11 @@ export async function fetchCredential(
     let value = field.value;
     if (!value && field.fieldType === ItemFieldType.Unsupported && field.title) {
       value = fetchFieldViaCli(itemId, vaultId, field.title);
+    }
+    // SSH key private key fields come back as a placeholder string rather than the actual PEM.
+    // Detect and resolve via `op item get --reveal`.
+    if (value && field.title && OP_REVEAL_PLACEHOLDER.test(value)) {
+      value = fetchFieldViaCli(itemId, vaultId, field.title, true);
     }
 
     // Skip still-empty values
