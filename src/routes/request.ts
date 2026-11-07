@@ -68,17 +68,41 @@ export function createRequestRouter(
       };
       pendingRequests.set(requestId, pending);
 
-      // Auto-deny on timeout
-      setTimeout(() => {
-        if (pendingRequests.has(requestId)) {
+      // Auto-deny on timeout and update the Slack message so it shows as expired
+      setTimeout(async () => {
+        const req = pendingRequests.get(requestId);
+        if (req) {
           pendingRequests.delete(requestId);
           resolve({ approved: false, error: 'Request timed out (no response)' });
+
+          if (req.slackMessageTs) {
+            try {
+              await slackClient.chat.update({
+                channel: channelId,
+                ts: req.slackMessageTs,
+                text: `⏰ Expired: ${req.service} (${req.scope})`,
+                blocks: [
+                  {
+                    type: 'section',
+                    text: {
+                      type: 'mrkdwn',
+                      text: `⏰ *Expired* — no response within timeout\n\n*Service:* \`${req.service}\`\n*Scope:* \`${req.scope}\`\n*Reason:* ${req.reason}`,
+                    },
+                  },
+                ],
+              });
+            } catch (err) {
+              console.error(`[request] ${requestId} — failed to update expired Slack message:`, err);
+            }
+          }
         }
       }, timeoutMs);
     });
 
     try {
-      await sendApprovalRequest(slackClient, channelId, requestId, service, scope, reason);
+      const ts = await sendApprovalRequest(slackClient, channelId, requestId, service, scope, reason);
+      const req = pendingRequests.get(requestId);
+      if (req && ts) req.slackMessageTs = ts;
     } catch (err) {
       pendingRequests.delete(requestId);
       const msg = err instanceof Error ? err.message : 'Unknown error';

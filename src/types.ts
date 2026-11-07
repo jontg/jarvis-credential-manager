@@ -18,6 +18,7 @@ export interface PendingRequest {
   scope: string;
   reason: string;
   createdAt: number;
+  slackMessageTs?: string;
   resolve: (response: CredentialResponse) => void;
   reject: (error: Error) => void;
 }
